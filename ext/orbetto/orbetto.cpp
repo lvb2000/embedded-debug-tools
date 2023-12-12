@@ -29,6 +29,7 @@
 #include <protos/perfetto/trace/trace.pb.h>
 #include <protos/perfetto/trace/trace_packet.pb.h>
 #include <protos/perfetto/trace/trace_packet_defaults.pb.h>
+#include <protos/perfetto/trace/ftrace/ftrace_event_bundle.pb.h>
 
 #define NUM_CHANNELS  32
 #define HW_CHANNEL    (NUM_CHANNELS)      /* Make the hardware fifo on the end of the software ones */
@@ -95,7 +96,7 @@ struct Options
     std::vector<std::tuple<uint64_t,uint32_t>> cs_digital;
     std::vector<std::tuple<uint64_t,uint64_t,std::vector<uint8_t>>> spi_decoded_mosi; /* Decoded spi data packets (shape: #data_packets * [timestamp_start,timestamp_end,data])*/
     std::vector<std::tuple<uint64_t,uint64_t,std::vector<uint8_t>>> spi_decoded_miso; /* Decoded spi data packets (shape: #data_packets * [timestamp_start,timestamp_end,data])*/
-    std::vector<std::vector<uint64_t,uint64_t>> workqueue_intervals_spi;
+    std::vector<std::vector<std::tuple<uint64_t,uint64_t>>> workqueue_intervals_spi;
     uint64_t timestamp_spi;
     uint64_t timestamp_end_spi; 
     /* SPI Sync */
@@ -128,7 +129,7 @@ struct PyOptions
     std::vector<std::tuple<uint64_t,uint32_t>> cs_digital;
     std::vector<std::tuple<uint64_t,uint64_t,std::vector<uint8_t>>> spi_decoded_mosi; /* Decoded spi data packets (shape: #data_packets * [timestamp_start,timestamp_end,data])*/
     std::vector<std::tuple<uint64_t,uint64_t,std::vector<uint8_t>>> spi_decoded_miso; /* Decoded spi data packets (shape: #data_packets * [timestamp_start,timestamp_end,data])*/
-    std::vector<std::vector<uint64_t,uint64_t>> workqueue_intervals_spi;
+    std::vector<std::vector<std::tuple<uint64_t,uint64_t>>> workqueue_intervals_spi;
     uint64_t timestamp_spi;
     uint64_t timestamp_end_spi;
     std::vector<std::tuple<uint64_t,uint32_t>> sync_digital;
@@ -579,47 +580,58 @@ auto last_prev_tid = prev_tid;
 static void _handlePc( struct pcSampleMsg *m, struct ITMDecoder *i )
 {
     assert( m->msgtype == MSG_PC_SAMPLE );
-    // check if pc is in idle task then skip
-    if(prev_tid == 0) return;
-    // find the new function name
-    auto pc_function = std::lower_bound(options.functions.begin(), options.functions.end(), m->pc,
-        [](const std::tuple<int32_t,std::string> addr_func_tuple, uint32_t value)
-        {
-            return get<0>(addr_func_tuple) < value;
-        });
-    // begin the new function in ftrace
-    if (pc_function == options.functions.end()) 
-    {
-        printf("For PC at 0x%08x no Function name could be found.\n", m->pc);
-    }else
-    {
-        uint64_t index = get<0>(*pc_function);
-        std::string function_name = get<1>(*pc_function);
-        // printf("Function: %s\n", function_name.c_str());
-        if(index==last_function_index and prev_tid==last_prev_tid) return;
-        // end the last function in ftrace
-        if(last_function_index != (uint64_t)-1){
-            auto *event = ftrace->add_event();
-            event->set_timestamp((_r.timeStamp * 1e9) / options.cps);
-            event->set_pid(PID_PC + last_prev_tid);
-            auto *exit = event->mutable_funcgraph_exit();
-            exit->set_depth(0);
-            exit->set_func(last_function_index);
-        }
-        // start ftrace event
-        {
-            auto *event = ftrace->add_event();
-            event->set_timestamp((_r.timeStamp * 1e9) / options.cps);
-            event->set_pid(PID_PC + prev_tid);
-            auto *entry = event->mutable_funcgraph_entry();
-            entry->set_depth(0);
-            entry->set_func(index);
-            // save last event
-            last_prev_tid = prev_tid;
-            last_function_index = index;
-        }
-    }
-
+    // // check if pc is in idle task then skip
+    // if(prev_tid == 0) return;
+    // // find the new function name
+    // auto pc_function = std::lower_bound(options.functions.begin(), options.functions.end(), m->pc,
+    //     [](const std::tuple<int32_t,std::string> addr_func_tuple, uint32_t value)
+    //     {
+    //         return get<0>(addr_func_tuple) < value;
+    //     });
+    // // begin the new function in ftrace
+    // if (pc_function == options.functions.end()) 
+    // {
+    //     printf("For PC at 0x%08x no Function name could be found.\n", m->pc);
+    // }else
+    // {
+    //     uint64_t index = get<0>(*pc_function);
+    //     std::string function_name = get<1>(*pc_function);
+    //     // printf("Function: %s\n", function_name.c_str());
+    //     if(index==last_function_index and prev_tid==last_prev_tid) return;
+    //     // end the last function in ftrace
+    //     if(last_function_index != (uint64_t)-1){
+    //         auto *ftrace_packet_pc = perfetto_trace->add_packet();
+    //         ftrace_packet_pc->set_trusted_packet_sequence_id(128);
+    //         ftrace_packet_pc->set_timestamp_clock_id(128);
+    //         ftrace_packet_pc->set_timestamp((_r.timeStamp * 1e9) / options.cps);
+    //         auto* ftrace_pc = ftrace_packet_pc->mutable_ftrace_events();
+    //         ftrace_pc->set_ftrace_clock(static_cast<perfetto::protos::FtraceClock>(2));
+    //         auto *event = ftrace_pc->add_event();
+    //         //event->set_timestamp((_r.timeStamp * 1e9) / options.cps);
+    //         event->set_pid(last_prev_tid);
+    //         auto *exit = event->mutable_funcgraph_exit();
+    //         exit->set_depth(0);
+    //         exit->set_func(last_function_index);
+    //     }
+    //     // start ftrace event
+    //     {
+    //         auto *ftrace_packet_pc = perfetto_trace->add_packet();
+    //         ftrace_packet_pc->set_trusted_packet_sequence_id(128);
+    //         ftrace_packet_pc->set_timestamp_clock_id(128);
+    //         ftrace_packet_pc->set_timestamp((_r.timeStamp * 1e9) / options.cps);
+    //         auto* ftrace_pc = ftrace_packet_pc->mutable_ftrace_events();
+    //         ftrace_pc->set_ftrace_clock(static_cast<perfetto::protos::FtraceClock>(2));
+    //         auto *event = ftrace_pc->add_event();
+    //         //event->set_timestamp((_r.timeStamp * 1e9) / options.cps);
+    //         event->set_pid(prev_tid);
+    //         auto *entry = event->mutable_funcgraph_entry();
+    //         entry->set_depth(0);
+    //         entry->set_func(index);
+    //         // save last event
+    //         last_prev_tid = prev_tid;
+    //         last_function_index = index;
+    //     }
+    // }
 }
 
 // ====================================================================================================
@@ -936,7 +948,7 @@ static void _spi_decoded(int64_t offset)
             }
             {
             // only print cs if smaller than 30.0f
-            auto *event = ftrace->add_event();
+            auto *event = ftrace_2->add_event();
             event->set_timestamp(timestamp_offset_start);
             event->set_pid(PID_SPI + 1);
             auto *print = event->mutable_print();
@@ -946,7 +958,7 @@ static void _spi_decoded(int64_t offset)
             }
             {
             // only print cs if smaller than 30.0f
-            auto *event = ftrace->add_event();
+            auto *event = ftrace_2->add_event();
             event->set_timestamp(timestamp_offset_end);
             event->set_pid(PID_SPI + 1);
             auto *print = event->mutable_print();
@@ -958,7 +970,7 @@ static void _spi_decoded(int64_t offset)
     }
 }
 
-static uint64_t find_matching_pattern(std::vector<uint64_t,uint64_t> spi_pattern){
+static void find_matching_pattern(std::vector<std::tuple<uint64_t,uint64_t>> spi_pattern){
     printf("Synchronise SWO and SPI ...\n");
     int window_length = spi_pattern.size();
     printf("\t Window length: %d\n", window_length);
@@ -993,46 +1005,24 @@ static uint64_t find_matching_pattern(std::vector<uint64_t,uint64_t> spi_pattern
     }
     // print overlapping intervals
     for(int i = 0;i<window_length;i++){
-        int diff = std::get<1>(options.workqueue_intervals_swo[min_sum_index+i])-options.workqueue_intervals_spi[i];
-        double rel_diff = (double)diff/((options.workqueue_intervals_spi[i]+std::get<1>(options.workqueue_intervals_swo[min_sum_index+i]))/2);
-        printf("\t\t SWO: %llu, SPI: %llu, DIFF: %i, REL DIFF: %f\n", std::get<1>(options.workqueue_intervals_swo[min_sum_index+i]), options.workqueue_intervals_spi[i], diff,rel_diff);
+        int diff = std::get<1>(options.workqueue_intervals_swo[min_sum_index+i])-std::get<1>(spi_pattern[i]);
+        double rel_diff = (double)diff/((std::get<1>(spi_pattern[i])+std::get<1>(options.workqueue_intervals_swo[min_sum_index+i]))/2);
+        printf("\t\t SWO: %llu, SPI: %llu, DIFF: %i, REL DIFF: %f\n", std::get<1>(options.workqueue_intervals_swo[min_sum_index+i]), std::get<1>(spi_pattern[i]), diff,rel_diff);
     }
-    // print both start timestamps
-    uint64_t swo_start = std::get<0>(options.workqueue_intervals_swo[min_sum_index]);
-    uint64_t swo_second = std::get<0>(options.workqueue_intervals_swo[min_sum_index+window_length-1]);
-    uint64_t spi_start = options.timestamp_spi;
-    uint64_t spi_second = options.timestamp_end_spi;
-    int64_t offset = spi_start-swo_start;
+    // set clock snapshots for perfetto sync
+    for (int i = 0;i<window_length;i++)
     {
         auto *ftrace_packet_sync = perfetto_trace->add_packet();
-        ftrace_packet_sync->set_trusted_packet_sequence_id(6);
-        ftrace_packet_sync->set_timestamp(spi_start);
+        ftrace_packet_sync->set_trusted_packet_sequence_id(128);
         // set Clock Snapshots for perfetto sync
-        {
-            auto* mutable_clock_snapshot = ftrace_packet_sync->mutable_clock_snapshot();
-            auto* clock = mutable_clock_snapshot->add_clocks();
-            clock->set_clock_id(6);
-            clock->set_timestamp(spi_start);
-            auto* clock_2 = mutable_clock_snapshot->add_clocks();
-            clock_2->set_clock_id(128);
-            clock_2->set_timestamp(spi_start);
-        }
+        auto* mutable_clock_snapshot = ftrace_packet_sync->mutable_clock_snapshot();
+        auto* clock = mutable_clock_snapshot->add_clocks();
+        clock->set_clock_id(128);
+        clock->set_timestamp(std::get<0>(options.workqueue_intervals_swo[min_sum_index+i]));
+        auto* clock_2 = mutable_clock_snapshot->add_clocks();
+        clock_2->set_clock_id(6);
+        clock_2->set_timestamp(std::get<0>(spi_pattern[i]));
     }
-    {
-        auto *ftrace_packet_sync = perfetto_trace->add_packet();
-        ftrace_packet_sync->set_trusted_packet_sequence_id(6);
-        // set Clock Snapshots for perfetto sync
-        {
-            auto* mutable_clock_snapshot = ftrace_packet_sync->mutable_clock_snapshot();
-            auto* clock = mutable_clock_snapshot->add_clocks();
-            clock->set_clock_id(6);
-            clock->set_timestamp(swo_second+offset);
-            auto* clock_2 = mutable_clock_snapshot->add_clocks();
-            clock_2->set_clock_id(128);
-            clock_2->set_timestamp(spi_second+1000000);
-        }
-    }
-    return offset;
 }
 
 // ====================================================================================================
@@ -1048,15 +1038,18 @@ static void _feedStream( struct Stream *stream )
     // clock id 6 is the default clock id also called BUILTIN_CLOCK_BOOTTIME
     ftrace_packet->set_timestamp_clock_id(6);
     ftrace = ftrace_packet->mutable_ftrace_events();
+    ftrace->set_ftrace_clock(static_cast<perfetto::protos::FtraceClock>(0));
     ftrace->set_cpu(0);
     // Init second Ftrace packet for clock sync
     ftrace_packet_2 = perfetto_trace->add_packet();
-    ftrace_packet_2->set_trusted_packet_sequence_id(128);
+    ftrace_packet_2->set_trusted_packet_sequence_id(6);
     ftrace_packet_2->set_sequence_flags(1);
     // clock id 128 is a custom gloabl clock id
-    ftrace_packet_2->set_timestamp_clock_id(128);
+    ftrace_packet_2->set_timestamp_clock_id(6);
     ftrace_2 = ftrace_packet->mutable_ftrace_events();
     ftrace_2->set_cpu(0);
+    ftrace_2->set_ftrace_clock(static_cast<perfetto::protos::FtraceClock>(0));
+
 
 
 
@@ -1097,25 +1090,13 @@ static void _feedStream( struct Stream *stream )
 
     // reset timestamp for second swo parsing
     _r.timeStamp = 0;
-    int 64_t offset = 0;
-    for (auto sync_packet in options.workqueue_intervals_spi)
+    for (auto sync_packet : options.workqueue_intervals_spi)
     {
-        int64_t offset = find_matching_pattern(sync_packet);
+        find_matching_pattern(sync_packet);
     }
-    printf("Offset: %llu\n", offset);
-    if(offset > 0)
-    {
-        _r.timeStamp = (uint64_t)(((double)offset) / 1e9 * options.cps);
-        //_spi_digital(0);
-        _spi_decoded(0);
-        //_sync_digital(0);
-    }else
-    {
-        offset=-offset;
-        //_spi_digital(offset);
-        _spi_decoded(offset);
-        //_sync_digital(offset);
-    }
+    //_spi_digital(0);
+    _spi_decoded(0);
+    //_sync_digital(0);
 
     {
     auto *event = ftrace->add_event();

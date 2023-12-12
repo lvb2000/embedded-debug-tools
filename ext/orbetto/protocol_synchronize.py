@@ -43,7 +43,7 @@ def getWorkQueuePattern(df,length=20,logic_levels=(0,3.3),hyst=0.05):
     work_queue_patterns = []
     for offset in np.linspace(10,len(edges)-length-5000,1000):
         work_queue_pattern = []
-        for i in range(offset,offset+length):
+        for i in range(int(offset),int(offset)+length):
             work_queue_pattern.append((int(edges[i][0]*1e9),int((edges[i+1][0]-edges[i][0])*1e9)))
         work_queue_patterns.append(work_queue_pattern)
     # work_queue_pattern2 = []
