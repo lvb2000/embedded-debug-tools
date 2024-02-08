@@ -29,3 +29,11 @@ executable('orbetto',
     link_with: [liborb, perfbuf_lib],
     install: true,
 )
+
+executable('test_etm',
+    sources: ['src/test_etm.cpp', 'src/device.cpp','src/mortem.cpp', git_version_info_h],
+    include_directories: ['src'] + perfbuf_lib.private_dir_include() + orbinc,
+    dependencies: [dependency('protobuf')] + orbuculum.get_variable('dependencies'),
+    link_with: [liborb, perfbuf_lib],
+    install: true,
+)

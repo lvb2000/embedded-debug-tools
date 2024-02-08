@@ -209,7 +209,7 @@ define px4_trace_tpiu_swo_stm32h7
 
     # -o trace.swo dumps the RAW data, not the demuxed data!!!
     shell killall orbuculum
-    shell orbuculum -O "-T4" -t1 &
+    shell orbuculum -O "-T4" &
     shell sleep 1
-    shell nc localhost 3443 > trace.swo &
+    shell nc localhost 3443 > trace.tpiu &
 end

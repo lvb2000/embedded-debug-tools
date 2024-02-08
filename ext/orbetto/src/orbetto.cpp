@@ -884,7 +884,7 @@ static struct option _longOptions[] =
 bool _processOptions( int argc, char *argv[] )
 {
     int c, optionIndex = 0;
-    while ( ( c = getopt_long ( argc, argv, "C:Ef:de:hVt:v:", _longOptions, &optionIndex ) ) != -1 )
+    while ( ( c = getopt_long ( argc, argv, "C:f:de:hVt:v:", _longOptions, &optionIndex ) ) != -1 )
         switch ( c )
         {
             // ------------------------------------
