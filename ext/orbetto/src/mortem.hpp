@@ -2,9 +2,18 @@
 
 #include "traceDecoder.h"
 #include <vector>
+#include <protos/perfetto/trace/trace.pb.h>
 
 #define MAX_CALL_STACK (15)
 #define DEFAULT_PM_BUFLEN_K (32)
+
+/* Enum for Callstack Properties*/
+enum CallStackProperties
+{
+    FUNCTION,
+    EXCEPTION_ENTRY,
+    EXCEPTION_EXIT
+};
 
 /* Materials required to be maintained across callbacks for output construction */
 struct opConstruct
@@ -32,14 +41,21 @@ struct RunTime
     bool traceRunning;                  /* Set if we are currently receiving trace */
     uint32_t context;                   /* Context we are currently working under */
     symbolMemaddr callStack[MAX_CALL_STACK]; /* Stack of calls */
-    unsigned int stackDepth;            /* Maximum stack depth */
-    bool stackDelPending;               /* Possibility to remove an entry from the stack, if address not given */
-    // global vector for CallStack
-    std::vector<symbolFunctionStore> actualCallStack;
+    CallStackProperties callStackProperties[MAX_CALL_STACK]; /* Stack of call properties */
+    int stackDepth;            
+    int exceptionDepth{-1};        
+    bool resentStackDel;               /* Possibility to remove an entry from the stack, if address not given */
+    bool exceptionEntry{false};
+    uint16_t instruction_count{0};
+    uint64_t cc{0};
+    uint32_t returnAddress{0};
+    bool committed{true};
+    void (*protobuffCallback)();
+    void (*protobuffCycleCount)();
+    void (*flushprotobuff)();
 };
 
 void dumpElement(RunTime *r, uint8_t element);
 void addElementToBuffer(RunTime *r, uint8_t element);
 void dumpElementStacked(RunTime *r);
 void initialization(RunTime *r);
-void clearStack(RunTime *r);

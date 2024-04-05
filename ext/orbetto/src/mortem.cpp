@@ -58,7 +58,7 @@ static void _appendToOPBuffer( struct RunTime *r, void *dat, int32_t lineno, enu
 
     
     // printf construct
-    //printf( "%s" EOL, construct );
+    printf( "%s" EOL, construct );
 
 }
 #pragma GCC diagnostic pop
@@ -83,49 +83,98 @@ static void _traceReport( enum verbLevel l, const char *fmt, ... )
     va_start( va, fmt );
     vsnprintf( op, SCRATCH_STRING_LEN, fmt, va );
     va_end( va );
-    //printf( "%s" EOL, op );
+    printf( "%s" EOL, op );
 }
 // ====================================================================================================
-static void _addRetToStack( RunTime *r, symbolMemaddr p )
+uint64_t global_etm_cc = 0;
+static void _stackReport(RunTime *r)
+{
+    if(global_etm_cc < 757)
+    {
+        return;
+    }
+    if ( r->stackDepth == 0 )
+    {
+        //_traceReport( V_DEBUG, "Stack is empty" );
+        if(r->callStack[r->stackDepth])
+        {
+            //printf("Stack %d: %08x\n", r->stackDepth, r->callStack[r->stackDepth]);
+        }
+        //printf("\n");
+    }
+    else
+    {
+        //_traceReport( V_DEBUG, "Stack depth is %d", r->stackDepth );
+        /* print current return stack*/
+        for ( int i = 0; i < r->stackDepth+1; i++ )
+        {
+            struct symbolFunctionStore *running_func = symbolFunctionAt( r->s, r->callStack[i] );
+            //_traceReport( V_DEBUG, "Stack %d: %08x", i, r->callStack[i] );
+            if(running_func)
+            {
+                //printf("Stack %d: %08x %s\n", i, r->callStack[i], running_func->funcname);
+            }
+            else
+            {
+                //printf("Stack %d: %08x\n", i, r->callStack[i]);
+            }
+        }
+        //printf("\n");
+    }
+}
+
+
+// ====================================================================================================
+static void _addRetToStack( RunTime *r, symbolMemaddr p ,CallStackProperties csp)
 
 {
     if ( r->stackDepth == MAX_CALL_STACK - 1 )
     {
         /* Stack is full, so make room for a new entry */
         memmove( &r->callStack[0], &r->callStack[1], sizeof( symbolMemaddr ) * ( MAX_CALL_STACK - 1 ) );
+        memmove( &r->callStackProperties[0], &r->callStackProperties[1], sizeof( CallStackProperties ) * ( MAX_CALL_STACK - 1 ) );
+    }
+    // check if where are exiting an exception
+    if (csp == EXCEPTION_ENTRY)
+    {
+        r->exceptionDepth = r->stackDepth;
     }
 
     r->callStack[r->stackDepth] = p;
-    _traceReport( V_DEBUG, "Pushed %08x to return stack", r->callStack[r->stackDepth] );
+    _traceReport( V_DEBUG, "Pushed %08x to return stack", r->callStack[r->stackDepth]);
 
     if ( r->stackDepth < MAX_CALL_STACK - 1 )
     {
         /* We aren't at max depth, so go ahead and remove this entry */
         r->stackDepth++;
     }
+    r->callStackProperties[r->stackDepth] = csp;
+}
+static void _removeRetFromStack(RunTime *r)
+{
+    if ( r->stackDepth > 0 )
+    {
+        r->stackDepth--;
+        if(r->exceptionDepth >= r->stackDepth)
+        {
+            r->exceptionDepth = 0;
+            r->callStackProperties[r->stackDepth] = EXCEPTION_EXIT;
+        }
+        _traceReport( V_DEBUG, "Popped %08x from return stack", r->callStack[r->stackDepth]);
+    }
+}
+static void _addTopToStack(RunTime *r,symbolMemaddr p)
+{
+    if ( r->stackDepth < MAX_CALL_STACK - 1 )
+    {
+        r->callStack[r->stackDepth] = p;
+    }
+    r->protobuffCallback();
 }
 // ====================================================================================================
-void printCallstack(RunTime *r){
-        printf("Callstack with depth %d\n", r->actualCallStack.size());
-        // print current stack depth
-        int count = 0;
-        for (symbolFunctionStore element : r->actualCallStack) {
-            for (int j = 0; j < count; j++)
-            {
-                printf("  ");            
-            }
-            printf("%s\n", element.funcname);
-            count++;
-        }
-        printf( "\n\n" );
-}
-void cutoff_first_n_chars(char *str, int n) {
-  if (n <= 0 || strlen(str) < n) {
-    return; // No characters to cutoff or string shorter than n
-  }
-  memmove(str, str + n, strlen(str) - n + 1); // Move remaining characters and null terminator
-}
-
+bool init = false;
+int last_stack_depth = -1;
+bool revertStack = false;
 static void _traceCB( void *d )
 
 /* Callback function for when valid TRACE decode is detected */
@@ -139,6 +188,16 @@ static void _traceCB( void *d )
     bool linearRun = false;
     enum instructionClass ic;
     symbolMemaddr newaddr;
+
+    /* Check for Cycle Count update to reset instruction count*/
+    if (TRACEStateChanged( &r->i, EV_CH_CYCLECOUNT) )
+    {
+        r->protobuffCycleCount();
+        r->flushprotobuff();
+        r->instruction_count = 0;
+        //printf("Cycle count reset with: %lu\n",cpu->cycleCount);
+    }
+    
 
     /* 2: Deal with exception entry */
     /* ============================ */
@@ -157,9 +216,11 @@ static void _traceCB( void *d )
                 }
                 else
                 {
-                    _appendToOPBuffer( r, NULL, r->op.currentLine, LT_EVENT, "========== Exception Entry (%d (%s) at 0x%08x return to %08x ) ==========",
+                    _appendToOPBuffer( r, NULL, r->op.currentLine, LT_EVENT, "========== Exception Entry (%d (%s) at 0x%08x return to 0x%08x ) ==========",
                                        cpu->exception, TRACEExceptionName( cpu->exception ), r->op.workingAddr, cpu->addr );
-                    _addRetToStack( r, cpu->addr );
+                    r->returnAddress = cpu->addr;
+                    revertStack = (cpu->addr != r->callStack[r->stackDepth]);
+                    r->exceptionEntry = true;
                 }
 
                 break;
@@ -182,30 +243,53 @@ static void _traceCB( void *d )
         if ( r->protocol != TRACE_PROT_MTB )
         {
             _traceReport( V_DEBUG, "%sCommanded CPU Address change (Was:0x%08x Commanded:0x%08x)" EOL,
-                          ( r->op.workingAddr == cpu->addr ) ? "" : "***INCONSISTENT*** ", r->op.workingAddr, cpu->addr );
+                          ( (r->op.workingAddr == cpu->addr) ||  r->exceptionEntry) ? "" : "***INCONSISTENT*** ", r->op.workingAddr, cpu->addr );
+            // Check if because of an exception we need to revert the stack delete because the previous instruction was not executed
+            r->committed = true;
+            if ( r->resentStackDel && revertStack)
+            {
+                _traceReport( V_DEBUG, "Stack delete reverted" );
+                r->stackDepth++;
+            }else
+            {
+                r->protobuffCallback();
+            }
+            r->resentStackDel = false;
+            // after reverting add the return address of before the exception to the stack
+            if( r->exceptionEntry)
+            {
+                _addRetToStack( r, r->returnAddress ,EXCEPTION_ENTRY);
+            }
+            r->exceptionEntry = false;
+            revertStack = false;
         }
-
-        /* Return Stack: If we had a stack deletion pending because of a candidate match, it wasn't, so abort */
-        if ( r->stackDelPending )
-        {
-            _traceReport( V_DEBUG, "Stack delete aborted" );
-        }
-
-        r->stackDelPending = false;
         /* Whatever the state was, this is an explicit setting of an address, so we need to respect it */
         r->op.workingAddr = cpu->addr;
     }
     else
     {
-        /* Return Stack: If we had a stack deletion pending because of a candidate match, the match was good, so commit */
+        // Return Stack: If we had a stack deletion pending because of a candidate match, the match was good, so commit
+        /*
         if ( ( r->stackDelPending == true ) && ( r->stackDepth ) )
         {
-            r->stackDepth--;
+            //r->stackDepth--;
             _traceReport( V_DEBUG, "Stack delete committed" );
+            //_stackReport(r);
         }
-
         r->stackDelPending = false;
+        */
+        //r->resentStackDel = false;
     }
+
+    // update callstack if stack depth changed when a address has been commanded
+    if ( last_stack_depth != r->stackDepth)
+    {
+        //printf("Stack depth changed from %d to %d\n", last_stack_depth, r->stackDepth);
+        last_stack_depth = r->stackDepth;
+        _addTopToStack(r,r->op.workingAddr);
+        _stackReport(r);
+    }
+    
 
     if ( TRACEStateChanged( &r->i, EV_CH_LINEAR ) )
     {
@@ -235,31 +319,28 @@ static void _traceCB( void *d )
     {
         /* Firstly, lets get the source code line...*/
         struct symbolLineStore *l = symbolLineAt( r->s, r->op.workingAddr );
+        struct symbolFunctionStore *func = symbolFunctionAt( r->s, r->op.workingAddr );
 
-        if ( l )
+        if ( func )
         {
-            /* If we have changed file or function put a header line in */
-            if ( l->function )
+            /* There is a valid function tag recognised here. If it's a change highlight it in the output. */
+            if ( ( func->filename != r->op.currentFileindex ) || ( func != r->op.currentFunctionptr ) )
             {
-                /* There is a valid function tag recognised here. If it's a change highlight it in the output. */
-                if ( ( l->function->filename != r->op.currentFileindex ) || ( l->function != r->op.currentFunctionptr ) )
-                {
-                    _appendToOPBuffer( r, l, r->op.currentLine, LT_FILE, "%s::%s", symbolGetFilename( r->s, l->function->filename ), l->function->funcname );
-                    r->op.currentFileindex     = l->function->filename;
-                    r->op.currentFunctionptr = l->function;
-                    r->op.currentLine = NO_LINE;
-                }
+                _appendToOPBuffer( r, l, r->op.currentLine, LT_FILE, "%s::%s", symbolGetFilename( r->s, func->filename ), func->funcname );
+                r->op.currentFileindex     = func->filename;
+                r->op.currentFunctionptr = func;
+                r->op.currentLine = NO_LINE;
             }
-            else
+        }
+        else
+        {
+            /* We didn't find a valid function, but we might have some information to work with.... */
+            if ( ( NO_FILE != r->op.currentFileindex ) || ( NULL != r->op.currentFunctionptr ) )
             {
-                /* We didn't find a valid function, but we might have some information to work with.... */
-                if ( ( NO_FILE != r->op.currentFileindex ) || ( NULL != r->op.currentFunctionptr ) )
-                {
-                    _appendToOPBuffer( r, l, r->op.currentLine, LT_FILE, "Unknown function" );
-                    r->op.currentFileindex     = NO_FILE;
-                    r->op.currentFunctionptr = NULL;
-                    r->op.currentLine = NO_LINE;
-                }
+                _appendToOPBuffer( r, l, r->op.currentLine, LT_FILE, "Unknown function" );
+                r->op.currentFileindex     = NO_FILE;
+                r->op.currentFunctionptr = NULL;
+                r->op.currentLine = NO_LINE;
             }
         }
 
@@ -293,46 +374,11 @@ static void _traceCB( void *d )
                                                ( r->op.workingAddr == targetAddr )
                                              ) ) );
             _appendToOPBuffer( r, l, r->op.currentLine, insExecuted ? LT_ASSEMBLY : LT_NASSEMBLY, a );
-            if(insExecuted && ( ic & LE_IC_JUMP )){
-                // cutoff first 19 characters
-                cutoff_first_n_chars(a, 23);
-                char *token; 
-                token = strtok(a, " ");
-                // do switch case for token
-                if(strcmp(token, "bl") == 0)
-                {
-                    symbolFunctionStore *f = symbolFunctionAt(r->s, newaddr);
-                    if(f != NULL)
-                    {
-                        //printf("Function addded to Callstack: %s\n", f->funcname);
-                        r->actualCallStack.push_back(*f);
-                        printCallstack(r);
-                    }else
-                    {
-                        //printf("Function addded to Callstack: 0x%08lx\n", newaddr);
-                        struct symbolFunctionStore newfunc;
-                        newfunc.funcname = "unknown";
-                        r->actualCallStack.push_back(newfunc);
-                        printCallstack(r);
-                    }
-                }
-                if(strcmp(token,"bx")==0 || strcmp(token,"pop")==0)
-                {
-                    // check if there are any elements in the call stack
-                    if(r->actualCallStack.size() > 0)
-                    {
-                        //printf("Function removed from Callstack: %s\n", r->actualCallStack.back().funcname);
-                        r->actualCallStack.pop_back();
-                        printCallstack(r);
-                    }else{
-                        struct symbolFunctionStore newfunc;
-                        newfunc.funcname = "main";
-                        r->actualCallStack.push_back(newfunc);
-                        printCallstack(r);
-                    }
-                }
+            /* Count instructions fot later interpolating between cycle count packets*/
+            if(insExecuted)
+            {
+                r->instruction_count++;
             }
-
             /* Move addressing along */
             if ( ( r->i.protocol != TRACE_PROT_ETM4 ) || ( ic & LE_IC_JUMP ) )
             {
@@ -351,7 +397,9 @@ static void _traceCB( void *d )
                 {
                     /* Push the instruction after this if it's a subroutine or ISR */
                     _traceReport( V_DEBUG, "Call to %08x", newaddr );
-                    _addRetToStack( r, r->op.workingAddr + ( ( ic & LE_IC_4BYTE ) ? 4 : 2 ) );
+                    _addRetToStack( r, r->op.workingAddr + ( ( ic & LE_IC_4BYTE ) ? 4 : 2 ) ,FUNCTION);
+                    //_addTopToStack(r,newaddr);
+                    //_stackReport(r);
                 }
 
                 r->op.workingAddr = insExecuted ? newaddr : r->op.workingAddr + ( ( ic & LE_IC_4BYTE ) ? 4 : 2 );
@@ -375,15 +423,16 @@ static void _traceCB( void *d )
                         /* get an address (in which case this one was correct), or we wont (in which case, don't unstack this one). */
                         if ( r->stackDepth )
                         {
-                            r->op.workingAddr = r->callStack[r->stackDepth - 1];
+                            r->op.workingAddr= r->callStack[r->stackDepth - 1];
                             _traceReport( V_DEBUG, "Return with stacked candidate to %08x", r->op.workingAddr );
                         }
                         else
                         {
                             _traceReport( V_DEBUG, "Return with no stacked candidate" );
                         }
-
-                        r->stackDelPending = true;
+                        r->committed = false;
+                        r->resentStackDel = true;
+                        _removeRetFromStack(r);
                     }
                 }
                 else
@@ -397,6 +446,8 @@ static void _traceCB( void *d )
                 /* Just a regular instruction, so just move along */
                 r->op.workingAddr += ( ic & LE_IC_4BYTE ) ? 4 : 2;
             }
+            // maybe ad perfetto here on bool function switch
+            
         }
         else
         {
@@ -405,7 +456,18 @@ static void _traceCB( void *d )
             disposition >>= 1;
             incAddr--;
         }
+        // add current function pointer to the stack if stack depth changed
+        if ( last_stack_depth != r->stackDepth)
+        {
+            //printf("Stack depth changed from %d to %d\n", last_stack_depth, r->stackDepth);
+            last_stack_depth = r->stackDepth;
+            _addTopToStack(r,r->op.workingAddr);
+            _stackReport(r);
+        }
     }
+    global_etm_cc += 1;
+    r->cc = global_etm_cc;
+    //printf("Global cycle count %llu\n",global_etm_cc);
 }
 // ====================================================================================================
 void dumpElement( RunTime *r, uint8_t element){

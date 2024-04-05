@@ -17,3 +17,4 @@ dist/
 /ext/orbetto/buffer/
 *.zip
 *.csv
+/ext/orbetto/example

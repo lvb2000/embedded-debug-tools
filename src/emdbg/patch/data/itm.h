@@ -181,6 +181,7 @@ void emdbg_itm8_block(uint8_t channel, uint8_t value)
 void emdbg_itm16_block(uint8_t channel, uint16_t value)
 {
     if (EMDBG_ITM->TER & (1ul << channel)) {
+        
         while (!EMDBG_ITM->PORT[channel].u32) ;
         EMDBG_ITM->PORT[channel].u16 = value;
     }
